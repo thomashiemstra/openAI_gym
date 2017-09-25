@@ -3,6 +3,10 @@ import gym.wrappers
 import numpy as np
 import neat
 import visualize
+from JSAnimation.IPython_display import display_animation
+from matplotlib import animation
+import matplotlib.pyplot as plt
+from IPython.display import display
 
 env= gym.make('CartPole-v1')
 env.reset()
@@ -24,7 +28,7 @@ def get_fitness(net):
     totalReward = 0
     while not done:
         runs += 1
-#        env.render()
+        env.render()
         output = net.activate(observation)
         action = np.argmax(output)
         observation, reward, done, info = env.step(int(action))
@@ -57,8 +61,9 @@ winner_net = neat.nn.FeedForwardNetwork.create(winner, config)
 visualize.draw_net(config, winner, False)
 
 observation = env.reset()
+frames = []
 for i in range(1000):
-    env.render()
+    frames.append(env.render(mode = 'rgb_array'))
     output = winner_net.activate(observation)
     action = np.argmax(output)
     observation, reward, done, info = env.step(int(action))
@@ -67,5 +72,22 @@ for i in range(1000):
 
 env.close()
 
+
+def save_frames_as_gif(frames):
+    """
+    Displays a list of frames as a gif, with controls
+    """
+    plt.figure(figsize=(frames[0].shape[1] / 72.0, frames[0].shape[0] / 72.0), dpi = 72)
+    patch = plt.imshow(frames[0])
+    plt.axis('off')
+
+    def animate(i):
+        patch.set_data(frames[i])
+
+    anim = animation.FuncAnimation(plt.gcf(), animate, frames = len(frames), interval=50)
+#    display(display_animation(anim, default_mode='loop'))
+    anim.save('animation.gif', writer='imagemagick', fps=60)
+
+#save_frames_as_gif(frames)
 
 

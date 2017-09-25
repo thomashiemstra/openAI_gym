@@ -2,6 +2,11 @@ import gym
 import gym.wrappers
 import numpy as np
 import neat
+from JSAnimation.IPython_display import display_animation
+from matplotlib import animation
+import matplotlib.pyplot as plt
+from IPython.display import display
+
 
 
 env= gym.make('MountainCar-v0')
@@ -28,6 +33,7 @@ def do_random_stuff():
         print(observation)
     env.close()
 
+do_random_stuff()
 #this solution is stupid just try out random networks untill it reaches the top,
 #no feedback other than wether or not it made it....
 def get_fitness(net):
@@ -71,9 +77,11 @@ winner_net = neat.nn.FeedForwardNetwork.create(winner, config)
 
 input("Press Enter to continue...")
 
+frames = []
+
 observation = env.reset()
 for i in range(1000):
-    env.render()
+    frames.append(env.render(mode = 'rgb_array'))
     output = winner_net.activate(observation)
     action = np.argmax(output)
     observation, reward, done, info = env.step(action)
@@ -82,5 +90,20 @@ for i in range(1000):
 
 env.close()
 
+def save_frames_as_gif(frames):
+    """
+    Displays a list of frames as a gif, with controls
+    """
+    plt.figure(figsize=(frames[0].shape[1] / 72.0, frames[0].shape[0] / 72.0), dpi = 72)
+    patch = plt.imshow(frames[0])
+    plt.axis('off')
 
+    def animate(i):
+        patch.set_data(frames[i])
+
+    anim = animation.FuncAnimation(plt.gcf(), animate, frames = len(frames), interval=50)
+#    display(display_animation(anim, default_mode='loop'))
+    anim.save('animation.gif', writer='imagemagick', fps=60)
+
+save_frames_as_gif(frames)
 
