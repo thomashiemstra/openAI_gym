@@ -3,6 +3,6 @@ my solutions to a few openai gym challanges
 
 
 
-![Alt text](car/animation.gif "")
-![Alt text](cartpole/animation.gif "")
-![Alt text](walker/third_walker.gif "")
+![Alt text](NEAT/car/animation.gif "")
+![Alt text](NEAT/cartpole/animation.gif "")
+![Alt text](NEAT/walker/third_walker.gif "")
