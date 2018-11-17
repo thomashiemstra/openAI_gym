@@ -16,10 +16,10 @@ def eval_genomes(genomes, config):
     for genome_id, genome in genomes:
 #        genome.fitness = 4.0
         net = neat.nn.FeedForwardNetwork.create(genome, config)
-        genome.fitness = get_fitness(net)
+        genome.fitness = get_fitness_dikke(net)
         
 
-def get_fitness(net):
+def get_fitness_dikke(net):
     observation = env.reset()
     done = False
     runs = 0
