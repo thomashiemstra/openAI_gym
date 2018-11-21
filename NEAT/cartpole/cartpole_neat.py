@@ -54,7 +54,7 @@ print('\nBest genome:\n{!s}'.format(winner))
 
 winner_net = neat.nn.FeedForwardNetwork.create(winner, config)
 
-visualize.draw_net(config, winner, False)
+# visualize.draw_net(config, winner, False)
 
 observation = env.reset()
 frames = []
