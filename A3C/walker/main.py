@@ -12,13 +12,12 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 GLOBAL_STEPS = 1000
-UPDATE_GLOBAL_ITER = 20
+UPDATE_GLOBAL_ITER = 30
 GAMMA = 0.9
 ENTROPY_BETA = 0.01
-LR_A = 0.0005    # learning rate for actor
-LR_C = 0.0005  # learning rate for critic
+LEARNING_RATE = 0.001    # learning rate for actor
 EPSILON = 1e-5
-GRAD_CLIP = 0.1
+GRAD_CLIP = 1
 DECAY = 0.99
 
 env = gym.make('CartPole-v0')
@@ -72,7 +71,7 @@ class ACNet(object):
         w_init = tf.random_normal_initializer(0., .1)
         with tf.variable_scope('model'):
 
-            l_s_1 = tf.layers.dense(self.s, 512, tf.nn.relu6, kernel_initializer=w_init, name='la')
+            l_s_1 = tf.layers.dense(self.s, 400, tf.nn.relu6, kernel_initializer=w_init, name='la')
 
             a_prob = tf.layers.dense(l_s_1, N_A, tf.nn.softmax, kernel_initializer=w_init, name='ap')
             value = tf.layers.dense(l_s_1, 1, kernel_initializer=w_init, name='v')  # state value
@@ -116,7 +115,7 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
         with tf.device(tf.train.replica_device_setter(
                 worker_device="/job:worker/task:%d" % task_index,
                 cluster=cluster)):
-            opt_a = tf.train.RMSPropOptimizer(LR_A, decay=DECAY, name='opt_a')
+            opt_a = tf.train.RMSPropOptimizer(LEARNING_RATE, decay=DECAY, name='opt_a')
             global_net = ACNet('global_net')
 
         local_net = ACNet('local_ac%d' % task_index, opt_a, global_net)
@@ -128,20 +127,23 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                                                hooks=hooks,) as sess:
             print('Start Worker Session: ', task_index)
             local_net.sess = sess
-            total_step = 1
             buffer_s, buffer_a, buffer_r = [], [], []
 
             while global_ep.value < GLOBAL_STEPS:
                 s = env.reset()
                 ep_r = 0
                 done = False
+                total_step = 0
                 while not done:
-                    # if task_index == 0:
-                    #     env.render()
                     a = local_net.choose_action(s)
                     s_, reward, done, info = env.step(a)
+
                     if done:
-                        reward = -5
+                        reward = -1
+                    if total_step > 400:
+                        reward = 10
+                        done = True
+
                     ep_r += reward
                     buffer_s.append(s)
                     buffer_a.append(a)
@@ -153,7 +155,8 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                         else:
                             v_s_ = sess.run(local_net.value, {local_net.s: s_[np.newaxis, :]})[0, 0]
                         buffer_v_target = []
-                        for r in buffer_r[::-1]:  # reverse buffer r
+                        buffer_r.reverse()
+                        for r in buffer_r:  # reverse buffer r
                             v_s_ = r + GAMMA * v_s_
                             buffer_v_target.append(v_s_)
                         buffer_v_target.reverse()
@@ -186,6 +189,7 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                             "| Ep: %i" % global_ep.value,
                             "| Ep_r: %i" % ep_r,
                             "| global_r %i" % global_running_r.value,
+                            "| total step %i" % total_step,
                         )
 
             print('Worker Done: ', task_index, time.time()-t1)
