@@ -18,28 +18,29 @@ ENTROPY_BETA = 0.01
 LR_A = 0.0005    # learning rate for actor
 LR_C = 0.0005  # learning rate for critic
 EPSILON = 1e-5
-GRAD_CLIP = 0.01
+GRAD_CLIP = 0.1
 DECAY = 0.99
 
 env = gym.make('CartPole-v0')
 N_S = env.observation_space.shape[0]
 N_A = env.action_space.n
 
+
 class ACNet(object):
     sess = None
 
-    def __init__(self, scope, opt_a=None, opt_c=None, global_net=None):
+    def __init__(self, scope, opt_a=None, global_net=None):
         if scope == 'global_net':  # get global network
             with tf.variable_scope(scope):
                 self.s = tf.placeholder(tf.float32, [None, N_S], 'S')
-                self.a_params, self.c_params = self._build_net(scope)[-2:]
+                _, _, self.params = self._build_net(scope)
         else:
             with tf.variable_scope(scope):
                 self.s = tf.placeholder(tf.float32, [None, N_S], 'S')
                 self.a_his = tf.placeholder(tf.int32, [None, ], 'A')
                 self.discounted_reward = tf.placeholder(tf.float32, [None, 1], 'Vtarget')
 
-                self.a_prob, self.value, self.a_params, self.c_params = self._build_net(scope)
+                self.a_prob, self.value, self.params = self._build_net(scope)
 
                 advantage = tf.subtract(self.discounted_reward, self.value, name='TD_error')
                 with tf.name_scope('c_loss'):
@@ -53,30 +54,31 @@ class ACNet(object):
 
                     self.a_loss = policy_loss - ENTROPY_BETA * entropy
 
+                self.loss = self.a_loss + 0.5 * self.c_loss
+
                 with tf.name_scope('local_grad'):
-                    self.a_grads = tf.gradients(self.a_loss, self.a_params)
-                    self.c_grads = tf.gradients(self.c_loss, self.c_params)
+                    self.grads_unclipped = tf.gradients(self.loss, self.params)
+                    self.grads, _ = tf.clip_by_global_norm(self.grads_unclipped, 0.1)
 
             self.global_step = tf.train.get_or_create_global_step()
             with tf.name_scope('sync'):
                 with tf.name_scope('pull'):
-                    self.pull_a_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.a_params, global_net.a_params)]
-                    self.pull_c_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.c_params, global_net.c_params)]
+                    self.pull_a_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.params, global_net.params)]
+
                 with tf.name_scope('push'):
-                    self.update_a_op = opt_a.apply_gradients(zip(self.a_grads, global_net.a_params), global_step=self.global_step)
-                    self.update_c_op = opt_c.apply_gradients(zip(self.c_grads, global_net.c_params))
+                    self.update_a_op = opt_a.apply_gradients(zip(self.grads, global_net.params), global_step=self.global_step)
 
     def _build_net(self, scope):
         w_init = tf.random_normal_initializer(0., .1)
-        with tf.variable_scope('actor'):
-            l_a = tf.layers.dense(self.s, 200, tf.nn.relu6, kernel_initializer=w_init, name='la')
-            a_prob = tf.layers.dense(l_a, N_A, tf.nn.softmax, kernel_initializer=w_init, name='ap')
-        with tf.variable_scope('critic'):
-            l_c = tf.layers.dense(self.s, 100, tf.nn.relu6, kernel_initializer=w_init, name='lc')
-            value = tf.layers.dense(l_c, 1, kernel_initializer=w_init, name='v')  # state value
-        a_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/actor')
-        c_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/critic')
-        return a_prob, value, a_params, c_params
+        with tf.variable_scope('model'):
+
+            l_s_1 = tf.layers.dense(self.s, 512, tf.nn.relu6, kernel_initializer=w_init, name='la')
+
+            a_prob = tf.layers.dense(l_s_1, N_A, tf.nn.softmax, kernel_initializer=w_init, name='ap')
+            value = tf.layers.dense(l_s_1, 1, kernel_initializer=w_init, name='v')  # state value
+
+        params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/model')
+        return a_prob, value, params
 
     def choose_action(self, s):  # run by a local
         prob_weights = self.sess.run(self.a_prob, feed_dict={self.s: s[np.newaxis, :]})
@@ -85,10 +87,10 @@ class ACNet(object):
         return action
 
     def update_global(self, feed_dict):  # run by a local
-        self.sess.run([self.update_a_op, self.update_c_op], feed_dict)  # local grads applies to global net
+        self.sess.run(self.update_a_op, feed_dict)  # local grads applies to global net
 
     def pull_global(self):  # run by a local
-        self.sess.run([self.pull_a_params_op, self.pull_c_params_op])
+        self.sess.run(self.pull_a_params_op)
 
 
 def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local_latch):
@@ -114,13 +116,10 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
         with tf.device(tf.train.replica_device_setter(
                 worker_device="/job:worker/task:%d" % task_index,
                 cluster=cluster)):
-            opt_a = tf.train.RMSPropOptimizer(LR_A, name='opt_a')
-            opt_c = tf.train.RMSPropOptimizer(LR_C, name='opt_c')
+            opt_a = tf.train.RMSPropOptimizer(LR_A, decay=DECAY, name='opt_a')
             global_net = ACNet('global_net')
 
-        # local_net = ACNet2('local_ac%d' % task_index, optimizer, global_net)
-
-        local_net = ACNet('local_ac%d' % task_index, opt_a, opt_c, global_net)
+        local_net = ACNet('local_ac%d' % task_index, opt_a, global_net)
 
         # set training steps
         hooks = [tf.train.StopAtStepHook(last_step=100000)]
@@ -141,7 +140,8 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                     #     env.render()
                     a = local_net.choose_action(s)
                     s_, reward, done, info = env.step(a)
-
+                    if done:
+                        reward = -5
                     ep_r += reward
                     buffer_s.append(s)
                     buffer_a.append(a)
