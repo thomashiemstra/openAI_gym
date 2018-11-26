@@ -11,20 +11,19 @@ import time
 import matplotlib.pyplot as plt
 import tensorflow as tf
 
-GLOBAL_STEPS = 10000
-UPDATE_GLOBAL_ITER = 10
+GLOBAL_STEPS = 1000
+UPDATE_GLOBAL_ITER = 20
 GAMMA = 0.9
 ENTROPY_BETA = 0.01
 LR_A = 0.0005    # learning rate for actor
-LR_C = 0.0005    # learning rate for critic
+LR_C = 0.0005  # learning rate for critic
 EPSILON = 1e-5
-GRAD_CLIP = 0.1
+GRAD_CLIP = 0.01
 DECAY = 0.99
 
 env = gym.make('CartPole-v0')
 N_S = env.observation_space.shape[0]
 N_A = env.action_space.n
-
 
 class ACNet(object):
     sess = None
@@ -37,32 +36,26 @@ class ACNet(object):
         else:
             with tf.variable_scope(scope):
                 self.s = tf.placeholder(tf.float32, [None, N_S], 'S')
-                self.a_his = tf.placeholder(tf.int32, [None, ], 'A')  # History of actions, one hot encoded array.
-                self.v_target = tf.placeholder(tf.float32, [None, 1], 'Vtarget')
+                self.a_his = tf.placeholder(tf.int32, [None, ], 'A')
+                self.discounted_reward = tf.placeholder(tf.float32, [None, 1], 'Vtarget')
 
-                self.a_prob, self.v, self.a_params, self.c_params = self._build_net(scope)
+                self.a_prob, self.value, self.a_params, self.c_params = self._build_net(scope)
 
-                advantage = tf.subtract(self.v_target, self.v, name='TD_error')
+                advantage = tf.subtract(self.discounted_reward, self.value, name='TD_error')
                 with tf.name_scope('c_loss'):
-                    self.critic_loss = tf.reduce_mean(tf.square(advantage))
+                    self.c_loss = tf.reduce_sum(tf.square(advantage))
 
                 with tf.name_scope('a_loss'):
                     log_prob = tf.reduce_sum(
-                        tf.log(self.a_prob) * tf.one_hot(self.a_his, N_A, dtype=tf.float32),
-                        axis=1, keep_dims=True)
-                    exp_v = log_prob * tf.stop_gradient(advantage)
+                        tf.log(self.a_prob) * tf.one_hot(self.a_his, N_A, dtype=tf.float32))
+                    policy_loss = - tf.reduce_sum(log_prob * tf.stop_gradient(advantage))
+                    entropy = -tf.reduce_sum(self.a_prob * tf.log(self.a_prob + 1e-5))  # encourage exploration
 
-                    entropy = -tf.reduce_sum(self.a_prob * tf.log(self.a_prob + EPSILON),
-                                             axis=1, keepdims=True)  # encourage exploration
-                    self.exp_v = ENTROPY_BETA * entropy + exp_v
-                    self.a_loss = tf.reduce_mean(-self.exp_v)
+                    self.a_loss = policy_loss - ENTROPY_BETA * entropy
 
                 with tf.name_scope('local_grad'):
-                    uncliped_a_grads = tf.gradients(self.a_loss, self.a_params)
-                    uncliped_c_grads = tf.gradients(self.critic_loss, self.c_params)
-
-                    self.a_grads = [tf.clip_by_average_norm(g, GRAD_CLIP) for g in uncliped_a_grads]
-                    self.c_grads = [tf.clip_by_average_norm(g, GRAD_CLIP) for g in uncliped_c_grads]
+                    self.a_grads = tf.gradients(self.a_loss, self.a_params)
+                    self.c_grads = tf.gradients(self.c_loss, self.c_params)
 
             self.global_step = tf.train.get_or_create_global_step()
             with tf.name_scope('sync'):
@@ -80,10 +73,10 @@ class ACNet(object):
             a_prob = tf.layers.dense(l_a, N_A, tf.nn.softmax, kernel_initializer=w_init, name='ap')
         with tf.variable_scope('critic'):
             l_c = tf.layers.dense(self.s, 100, tf.nn.relu6, kernel_initializer=w_init, name='lc')
-            v = tf.layers.dense(l_c, 1, kernel_initializer=w_init, name='v')  # state value
+            value = tf.layers.dense(l_c, 1, kernel_initializer=w_init, name='v')  # state value
         a_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/actor')
         c_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/critic')
-        return a_prob, v, a_params, c_params
+        return a_prob, value, a_params, c_params
 
     def choose_action(self, s):  # run by a local
         prob_weights = self.sess.run(self.a_prob, feed_dict={self.s: s[np.newaxis, :]})
@@ -102,10 +95,11 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
     import tensorflow as tf
     # set work's ip:port
     cluster = tf.train.ClusterSpec({
-        "ps": ['localhost:2220', 'localhost:2230'],
+        "ps": ['localhost:2220'],
         "worker": ['localhost:2221', 'localhost:2222', 'localhost:2223',
                    'localhost:2224', 'localhost:2225', 'localhost:2226',
                    'localhost:2227', 'localhost:2228', 'localhost:2229',
+                   # 'localhost:2230', 'localhost:2231', 'localhost:2232',
                    ]
     })
 
@@ -120,9 +114,11 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
         with tf.device(tf.train.replica_device_setter(
                 worker_device="/job:worker/task:%d" % task_index,
                 cluster=cluster)):
-            opt_a = tf.train.RMSPropOptimizer(LR_A, decay=DECAY, use_locking=True, name='opt_a')
-            opt_c = tf.train.RMSPropOptimizer(LR_C, decay=DECAY, use_locking=True, name='opt_c')
+            opt_a = tf.train.RMSPropOptimizer(LR_A, name='opt_a')
+            opt_c = tf.train.RMSPropOptimizer(LR_C, name='opt_c')
             global_net = ACNet('global_net')
+
+        # local_net = ACNet2('local_ac%d' % task_index, optimizer, global_net)
 
         local_net = ACNet('local_ac%d' % task_index, opt_a, opt_c, global_net)
 
@@ -144,18 +140,18 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                     # if task_index == 0:
                     #     env.render()
                     a = local_net.choose_action(s)
-                    s_, r, done, info = env.step(a)
-                    if done: r = -5.
-                    ep_r += r
+                    s_, reward, done, info = env.step(a)
+
+                    ep_r += reward
                     buffer_s.append(s)
                     buffer_a.append(a)
-                    buffer_r.append(r)
+                    buffer_r.append(reward)
 
                     if total_step % UPDATE_GLOBAL_ITER == 0 or done:  # update global and assign to local net
                         if done:
                             v_s_ = 0  # terminal
                         else:
-                            v_s_ = sess.run(local_net.v, {local_net.s: s_[np.newaxis, :]})[0, 0]
+                            v_s_ = sess.run(local_net.value, {local_net.s: s_[np.newaxis, :]})[0, 0]
                         buffer_v_target = []
                         for r in buffer_r[::-1]:  # reverse buffer r
                             v_s_ = r + GAMMA * v_s_
@@ -167,7 +163,7 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                         feed_dict = {
                             local_net.s: buffer_s,
                             local_net.a_his: buffer_a,
-                            local_net.v_target: buffer_v_target,
+                            local_net.discounted_reward: buffer_v_target,
                         }
                         local_net.update_global(feed_dict)
                         buffer_s, buffer_a, buffer_r = [], [], []
@@ -201,7 +197,7 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                 done = False
                 while not done:
                     a = local_net.choose_action(s)
-                    s, r, done, info = env.step(a)
+                    s, reward, done, info = env.step(a)
                     env.render()
 
                 env.close()
@@ -238,10 +234,11 @@ if __name__ == "__main__":
     global_running_r = mp.Value('d', 0)
 
     jobs = [
-        ('ps', 0), ('ps', 1),
+        ('ps', 0),
         ('worker', 0), ('worker', 1), ('worker', 2),
         ('worker', 3), ('worker', 4), ('worker', 5),
         ('worker', 6), ('worker', 7), ('worker', 8),
+        # ('worker', 9), ('worker', 10), ('worker', 11),
     ]
 
     num_workers = get_num_workers(jobs)
