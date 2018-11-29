@@ -62,7 +62,10 @@ class ACNet(object):
             self.global_step = tf.train.get_or_create_global_step()
             with tf.name_scope('sync'):
                 with tf.name_scope('pull'):
-                    self.pull_a_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.params, global_net.params)]
+                    self.pull_params = [l_p.assign(g_p) for l_p, g_p in zip(self.params, global_net.params)]
+
+                with tf.name_scope('push_params'):
+                    self.push_params = [g_p.assign(l_p) for g_p, l_p in zip(global_net.params, self.params)]
 
                 with tf.name_scope('push'):
                     self.update_a_op = opt_a.apply_gradients(zip(self.grads, global_net.params), global_step=self.global_step)
@@ -89,11 +92,15 @@ class ACNet(object):
         self.sess.run(self.update_a_op, feed_dict)  # local grads applies to global net
 
     def pull_global(self):  # run by a local
-        self.sess.run(self.pull_a_params_op)
+        self.sess.run(self.pull_params)
+
+    def push_to_global(self):
+        self.sess.run(self.push_params)
 
 
 def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local_latch):
-    import tensorflow as tf
+    chief = (task_index == 0)
+
     # set work's ip:port
     cluster = tf.train.ClusterSpec({
         "ps": ['localhost:2220'],
@@ -120,13 +127,27 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
 
         local_net = ACNet('local_ac%d' % task_index, opt_a, global_net)
 
+        # terrible hack
+        checkpoint_dir = None
+        if chief:
+            checkpoint_dir = "C:/Users/thomas/PycharmProjects/openAI_gym/A3C/walker/tmp"
+
         # set training steps
         hooks = [tf.train.StopAtStepHook(last_step=100000)]
         with tf.train.MonitoredTrainingSession(master=server.target,
+                                               checkpoint_dir=checkpoint_dir,
                                                is_chief=True,
+                                               log_step_count_steps=0,
                                                hooks=hooks,) as sess:
             print('Start Worker Session: ', task_index)
             local_net.sess = sess
+            # terrible hack 2.0
+            if chief:
+                local_net.push_to_global()
+            else:
+                time.sleep(2)
+                local_net.pull_global()
+
             buffer_s, buffer_a, buffer_r = [], [], []
 
             while global_ep.value < GLOBAL_STEPS:
