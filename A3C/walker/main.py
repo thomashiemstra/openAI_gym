@@ -14,10 +14,10 @@ import tensorflow as tf
 GLOBAL_STEPS = 1000
 UPDATE_GLOBAL_ITER = 30
 GAMMA = 0.9
-ENTROPY_BETA = 0.01
+ENTROPY_BETA = 0.1
 LEARNING_RATE = 0.001    # learning rate for actor
 EPSILON = 1e-5
-GRAD_CLIP = 1
+GRAD_CLIP = 0.1
 DECAY = 0.99
 
 env = gym.make('CartPole-v0')
@@ -57,7 +57,7 @@ class ACNet(object):
 
                 with tf.name_scope('local_grad'):
                     self.grads_unclipped = tf.gradients(self.loss, self.params)
-                    self.grads, _ = tf.clip_by_global_norm(self.grads_unclipped, 0.1)
+                    self.grads, _ = tf.clip_by_global_norm(self.grads_unclipped, GRAD_CLIP)
 
             self.global_step = tf.train.get_or_create_global_step()
             with tf.name_scope('sync'):
@@ -129,8 +129,8 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
 
         # terrible hack
         checkpoint_dir = None
-        if chief:
-            checkpoint_dir = "C:/Users/thomas/PycharmProjects/openAI_gym/A3C/walker/tmp"
+        # if chief:
+        #     checkpoint_dir = "C:/Users/thomas/PycharmProjects/openAI_gym/A3C/walker/tmp"
 
         # set training steps
         hooks = [tf.train.StopAtStepHook(last_step=100000)]
@@ -142,11 +142,11 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
             print('Start Worker Session: ', task_index)
             local_net.sess = sess
             # terrible hack 2.0
-            if chief:
-                local_net.push_to_global()
-            else:
-                time.sleep(2)
-                local_net.pull_global()
+            # if chief:
+            #     local_net.push_to_global()
+            # else:
+            #     time.sleep(2)
+            #     local_net.pull_global()
 
             buffer_s, buffer_a, buffer_r = [], [], []
 
@@ -155,6 +155,7 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                 ep_r = 0
                 done = False
                 total_step = 0
+                local_net.pull_global()
                 while not done:
                     a = local_net.choose_action(s)
                     s_, reward, done, info = env.step(a)
@@ -215,17 +216,17 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
 
             print('Worker Done: ', task_index, time.time()-t1)
 
-            if task_index == 0:
-                env = gym.make('CartPole-v0')
-
-                s = env.reset()
-                done = False
-                while not done:
-                    a = local_net.choose_action(s)
-                    s, reward, done, info = env.step(a)
-                    env.render()
-
-                env.close()
+            # if task_index == 0:
+            #     env = gym.make('CartPole-v0')
+            #
+            #     s = env.reset()
+            #     done = False
+            #     while not done:
+            #         a = local_net.choose_action(s)
+            #         s, reward, done, info = env.step(a)
+            #         env.render()
+            #
+            #     env.close()
 
             with local_latch.get_lock():
                 local_latch.value -= 1
