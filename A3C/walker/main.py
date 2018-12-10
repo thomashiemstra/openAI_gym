@@ -10,92 +10,96 @@ import gym
 import time
 import matplotlib.pyplot as plt
 import tensorflow as tf
+from matplotlib import animation
+import pickle
 
-GLOBAL_STEPS = 1000
+GAME = 'Pendulum-v0'
+GLOBAL_STEPS = 3000
 UPDATE_GLOBAL_ITER = 30
 GAMMA = 0.9
-ENTROPY_BETA = 0.1
-LEARNING_RATE = 0.001    # learning rate for actor
+ENTROPY_BETA = 0.01
+LEARNING_RATE = 0.0001    # learning rate for actor
+END_LEARNING_RATE = 0.0001
 EPSILON = 1e-5
 GRAD_CLIP = 0.1
 DECAY = 0.99
 
-env = gym.make('CartPole-v0')
+env = gym.make(GAME)
+
 N_S = env.observation_space.shape[0]
-N_A = env.action_space.n
+N_A = env.action_space.shape[0]
+A_BOUND = [env.action_space.low, env.action_space.high]
 
 
 class ACNet(object):
     sess = None
 
-    def __init__(self, scope, opt_a=None, global_net=None):
+    def __init__(self, scope, opt_a=None, opt_c=None, global_net=None, global_step=None):
         if scope == 'global_net':  # get global network
             with tf.variable_scope(scope):
                 self.s = tf.placeholder(tf.float32, [None, N_S], 'S')
-                _, _, self.params = self._build_net(scope)
+                self.a_params, self.c_params = self._build_net(scope)[-2:]
         else:
             with tf.variable_scope(scope):
+                self.global_step = global_step
                 self.s = tf.placeholder(tf.float32, [None, N_S], 'S')
-                self.a_his = tf.placeholder(tf.int32, [None, ], 'A')
-                self.discounted_reward = tf.placeholder(tf.float32, [None, 1], 'Vtarget')
+                self.a_his = tf.placeholder(tf.float32, [None, N_A], 'A')
+                self.v_target = tf.placeholder(tf.float32, [None, 1], 'Vtarget')
 
-                self.a_prob, self.value, self.params = self._build_net(scope)
+                mu, sigma, self.v, self.a_params, self.c_params = self._build_net(scope)
 
-                advantage = tf.subtract(self.discounted_reward, self.value, name='TD_error')
+                td = tf.subtract(self.v_target, self.v, name='TD_error')
                 with tf.name_scope('c_loss'):
-                    self.c_loss = tf.reduce_sum(tf.square(advantage))
+                    self.c_loss = tf.reduce_mean(tf.square(td))
+
+                with tf.name_scope('wrap_a_out'):
+                    mu, sigma = mu, sigma + 1e-4
+
+                normal_dist = tf.distributions.Normal(mu, sigma)
 
                 with tf.name_scope('a_loss'):
-                    log_prob = tf.reduce_sum(
-                        tf.log(self.a_prob) * tf.one_hot(self.a_his, N_A, dtype=tf.float32))
-                    policy_loss = - tf.reduce_sum(log_prob * tf.stop_gradient(advantage))
-                    entropy = -tf.reduce_sum(self.a_prob * tf.log(self.a_prob + 1e-5))  # encourage exploration
+                    log_prob = normal_dist.log_prob(self.a_his)
+                    exp_v = log_prob * tf.stop_gradient(td)
+                    entropy = normal_dist.entropy()  # encourage exploration
+                    self.exp_v = ENTROPY_BETA * entropy + exp_v
+                    self.a_loss = tf.reduce_mean(-self.exp_v)
 
-                    self.a_loss = policy_loss - ENTROPY_BETA * entropy
-
-                self.loss = self.a_loss + 0.5 * self.c_loss
-
+                with tf.name_scope('choose_a'):  # use local params to choose action
+                    self.A = tf.clip_by_value(tf.squeeze(normal_dist.sample(1), axis=[0, 1]), A_BOUND[0], A_BOUND[1])
                 with tf.name_scope('local_grad'):
-                    self.grads_unclipped = tf.gradients(self.loss, self.params)
-                    self.grads, _ = tf.clip_by_global_norm(self.grads_unclipped, GRAD_CLIP)
+                    self.a_grads = tf.gradients(self.a_loss, self.a_params)
+                    self.c_grads = tf.gradients(self.c_loss, self.c_params)
 
-            self.global_step = tf.train.get_or_create_global_step()
             with tf.name_scope('sync'):
                 with tf.name_scope('pull'):
-                    self.pull_params = [l_p.assign(g_p) for l_p, g_p in zip(self.params, global_net.params)]
-
-                with tf.name_scope('push_params'):
-                    self.push_params = [g_p.assign(l_p) for g_p, l_p in zip(global_net.params, self.params)]
-
+                    self.pull_a_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.a_params, global_net.a_params)]
+                    self.pull_c_params_op = [l_p.assign(g_p) for l_p, g_p in zip(self.c_params, global_net.c_params)]
                 with tf.name_scope('push'):
-                    self.update_a_op = opt_a.apply_gradients(zip(self.grads, global_net.params), global_step=self.global_step)
+                    self.update_a_op = opt_a.apply_gradients(zip(self.a_grads, global_net.a_params))
+                    self.update_c_op = opt_c.apply_gradients(zip(self.c_grads, global_net.c_params))
 
     def _build_net(self, scope):
         w_init = tf.random_normal_initializer(0., .1)
-        with tf.variable_scope('model'):
-
-            l_s_1 = tf.layers.dense(self.s, 400, tf.nn.relu6, kernel_initializer=w_init, name='la')
-
-            a_prob = tf.layers.dense(l_s_1, N_A, tf.nn.softmax, kernel_initializer=w_init, name='ap')
-            value = tf.layers.dense(l_s_1, 1, kernel_initializer=w_init, name='v')  # state value
-
-        params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/model')
-        return a_prob, value, params
-
-    def choose_action(self, s):  # run by a local
-        prob_weights = self.sess.run(self.a_prob, feed_dict={self.s: s[np.newaxis, :]})
-        action = np.random.choice(range(prob_weights.shape[1]),
-                                  p=prob_weights.ravel())  # select action w.r.t the actions prob
-        return action
+        with tf.variable_scope('actor'):
+            l_a = tf.layers.dense(self.s, 400, tf.nn.relu6, kernel_initializer=w_init, name='la')
+            mu = tf.layers.dense(l_a, N_A, tf.nn.tanh, kernel_initializer=w_init, name='mu')*A_BOUND[1]
+            sigma = tf.layers.dense(l_a, N_A, tf.nn.softplus, kernel_initializer=w_init, name='sigma')
+        with tf.variable_scope('critic'):
+            l_c = tf.layers.dense(self.s, 200, tf.nn.relu6, kernel_initializer=w_init, name='lc')
+            v = tf.layers.dense(l_c, 1, kernel_initializer=w_init, name='v')  # state value
+        a_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/actor')
+        c_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope + '/critic')
+        return mu, sigma, v, a_params, c_params
 
     def update_global(self, feed_dict):  # run by a local
-        self.sess.run(self.update_a_op, feed_dict)  # local grads applies to global net
+        self.sess.run([self.update_a_op, self.update_c_op], feed_dict)  # local grads applies to global net
 
     def pull_global(self):  # run by a local
-        self.sess.run(self.pull_params)
+        self.sess.run([self.pull_a_params_op, self.pull_c_params_op])
 
-    def push_to_global(self):
-        self.sess.run(self.push_params)
+    def choose_action(self, s):  # run by a local
+        s = s[np.newaxis, :]
+        return self.sess.run(self.A, {self.s: s})
 
 
 def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local_latch):
@@ -117,15 +121,21 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
         server.join()
     else:
         t1 = time.time()
-        env = gym.make('CartPole-v0').unwrapped
+        env = gym.make(GAME).unwrapped
         print('Start Worker: ', task_index)
         with tf.device(tf.train.replica_device_setter(
                 worker_device="/job:worker/task:%d" % task_index,
                 cluster=cluster)):
+
+            global_step = tf.train.get_or_create_global_step(graph=None)
+            adaptive_learning_rate = tf.train.polynomial_decay(LEARNING_RATE, global_step, GLOBAL_STEPS, END_LEARNING_RATE)
+
             opt_a = tf.train.RMSPropOptimizer(LEARNING_RATE, decay=DECAY, name='opt_a')
+            opt_c = tf.train.RMSPropOptimizer(LEARNING_RATE, decay=DECAY, name='opt_a')
+
             global_net = ACNet('global_net')
 
-        local_net = ACNet('local_ac%d' % task_index, opt_a, global_net)
+            local_net = ACNet('local_ac%d' % task_index, opt_a, opt_c, global_net, global_step)
 
         # terrible hack
         checkpoint_dir = None
@@ -155,30 +165,23 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                 ep_r = 0
                 done = False
                 total_step = 0
-                local_net.pull_global()
                 while not done:
                     a = local_net.choose_action(s)
                     s_, reward, done, info = env.step(a)
-
-                    if done:
-                        reward = -1
-                    if total_step > 400:
-                        reward = 10
-                        done = True
+                    done = True if total_step == 200 - 1 else False
 
                     ep_r += reward
                     buffer_s.append(s)
                     buffer_a.append(a)
-                    buffer_r.append(reward)
+                    buffer_r.append((reward + 8) / 8)
 
                     if total_step % UPDATE_GLOBAL_ITER == 0 or done:  # update global and assign to local net
                         if done:
                             v_s_ = 0  # terminal
                         else:
-                            v_s_ = sess.run(local_net.value, {local_net.s: s_[np.newaxis, :]})[0, 0]
+                            v_s_ = sess.run(local_net.v, {local_net.s: s_[np.newaxis, :]})[0, 0]
                         buffer_v_target = []
-                        buffer_r.reverse()
-                        for r in buffer_r:  # reverse buffer r
+                        for r in buffer_r[::-1]:  # reverse buffer r
                             v_s_ = r + GAMMA * v_s_
                             buffer_v_target.append(v_s_)
                         buffer_v_target.reverse()
@@ -188,7 +191,7 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                         feed_dict = {
                             local_net.s: buffer_s,
                             local_net.a_his: buffer_a,
-                            local_net.discounted_reward: buffer_v_target,
+                            local_net.v_target: buffer_v_target,
                         }
                         local_net.update_global(feed_dict)
                         buffer_s, buffer_a, buffer_r = [], [], []
@@ -205,31 +208,55 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
 
                         with global_ep.get_lock():
                             global_ep.value += 1
+                            # local_net.increment_global_step()
 
                         print(
                             "Task: %i" % task_index,
                             "| Ep: %i" % global_ep.value,
                             "| Ep_r: %i" % ep_r,
                             "| global_r %i" % global_running_r.value,
-                            "| total step %i" % total_step,
+                            "| total step %i" % total_step
                         )
+
+
 
             print('Worker Done: ', task_index, time.time()-t1)
 
-            # if task_index == 0:
-            #     env = gym.make('CartPole-v0')
-            #
-            #     s = env.reset()
-            #     done = False
-            #     while not done:
-            #         a = local_net.choose_action(s)
-            #         s, reward, done, info = env.step(a)
-            #         env.render()
-            #
-            #     env.close()
+            if task_index == 0:
+                frames = []
+                env = gym.make(GAME)
+
+                s = env.reset()
+                done = False
+                while not done:
+                    frames.append(env.render(mode='rgb_array'))
+                    a = local_net.choose_action(s)
+                    print(a)
+                    s, reward, done, info = env.step(a)
+
+                env.close()
+                save_frames_as_gif(frames)
+                with open('test.pkl', 'wb') as output:
+                    pickle.dump(frames, output, pickle.HIGHEST_PROTOCOL)
 
             with local_latch.get_lock():
                 local_latch.value -= 1
+
+
+def save_frames_as_gif(frames):
+    """
+    Displays a list of frames as a gif, with controls
+    """
+    plt.figure(figsize=(frames[0].shape[1] / 72.0, frames[0].shape[0] / 72.0), dpi=72)
+    patch = plt.imshow(frames[0])
+    plt.axis('off')
+
+    def animate(i):
+        patch.set_data(frames[i])
+
+    anim = animation.FuncAnimation(plt.gcf(), animate, frames=len(frames), interval=50)
+
+    anim.save('output.html', writer='html', fps=60)
 
 
 def queue_flusher(q, latch):
