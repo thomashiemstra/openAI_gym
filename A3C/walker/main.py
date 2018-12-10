@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from matplotlib import animation
 import pickle
+import datetime
 
 GAME = 'Pendulum-v0'
 GLOBAL_STEPS = 3000
@@ -255,8 +256,10 @@ def save_frames_as_gif(frames):
         patch.set_data(frames[i])
 
     anim = animation.FuncAnimation(plt.gcf(), animate, frames=len(frames), interval=50)
+    now = datetime.datetime.now()
 
-    anim.save('output.html', writer='html', fps=60)
+    file_name = 'output_' + now.strftime("%m-%d_%H:%M:%S") + '.html'
+    anim.save(file_name, writer='html', fps=60)
 
 
 def queue_flusher(q, latch):
