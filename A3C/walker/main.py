@@ -9,6 +9,9 @@ import numpy as np
 import gym
 import time
 import matplotlib.pyplot as plt
+import os
+os.environ["CUDA_VISIBLE_DEVICES"]="-1"
+
 import tensorflow as tf
 from matplotlib import animation
 import pickle
@@ -124,8 +127,8 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
         t1 = time.time()
         env = gym.make(GAME).unwrapped
         print('Start Worker: ', task_index)
-        with tf.device(tf.train.replica_device_setter(
-                worker_device="/job:worker/task:%d" % task_index,
+        with tf.device(tf.train.replica_device_setter(ps_device="/job:ps/cpu:0",
+                worker_device="/job:worker/task:%d/cpu:0" % task_index,
                 cluster=cluster)):
 
             global_step = tf.train.get_or_create_global_step(graph=None)
@@ -149,7 +152,8 @@ def work(job_name, task_index, global_ep, r_local_queue, global_running_r, local
                                                checkpoint_dir=checkpoint_dir,
                                                is_chief=True,
                                                log_step_count_steps=0,
-                                               hooks=hooks,) as sess:
+                                               hooks=hooks,
+                                               config=tf.ConfigProto(device_count={'GPU': 0})) as sess:
             print('Start Worker Session: ', task_index)
             local_net.sess = sess
             # terrible hack 2.0
